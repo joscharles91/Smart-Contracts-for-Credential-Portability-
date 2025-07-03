@@ -5,6 +5,8 @@
 (define-constant err-already-exists (err u103))
 (define-constant err-invalid-input (err u104))
 (define-constant err-institution-not-verified (err u105))
+(define-constant err-access-denied (err u106))
+(define-constant err-access-expired (err u107))
 
 (define-map institutions
   { institution-id: uint }
@@ -248,4 +250,117 @@
 
 (define-private (get-student-credential-by-index-helper (index uint))
   (get-student-credential-by-index tx-sender index)
+)
+
+(define-map credential-access-grants
+  { credential-id: uint, grantee: principal }
+  {
+    granted-by: principal,
+    granted-at: uint,
+    expires-at: uint,
+    access-level: (string-ascii 20),
+    active: bool
+  }
+)
+
+(define-map grantee-access-count
+  { grantee: principal }
+  { count: uint }
+)
+
+(define-data-var next-access-id uint u1)
+
+(define-read-only (get-access-grant (credential-id uint) (grantee principal))
+  (map-get? credential-access-grants { credential-id: credential-id, grantee: grantee })
+)
+
+(define-read-only (can-access-credential (credential-id uint) (accessor principal))
+  (let (
+    (credential (unwrap! (get-credential credential-id) (err err-not-found)))
+    (grant (get-access-grant credential-id accessor))
+  )
+    (if (is-eq accessor (get student-address credential))
+      (ok true)
+      (match grant
+        access-data
+        (ok (and 
+          (get active access-data)
+          (< stacks-block-height (get expires-at access-data))
+        ))
+        (ok false)
+      )
+    )
+  )
+)
+
+(define-public (grant-credential-access 
+  (credential-id uint) 
+  (grantee principal) 
+  (access-level (string-ascii 20))
+  (duration-blocks uint)
+)
+  (let (
+    (credential (unwrap! (get-credential credential-id) err-not-found))
+    (expires-at (+ stacks-block-height duration-blocks))
+    (grantee-count (get count (default-to { count: u0 } (map-get? grantee-access-count { grantee: grantee }))))
+  )
+    (asserts! (is-eq tx-sender (get student-address credential)) err-unauthorized)
+    (asserts! (not (get revoked credential)) err-unauthorized)
+    (asserts! (> duration-blocks u0) err-invalid-input)
+    
+    (map-set credential-access-grants
+      { credential-id: credential-id, grantee: grantee }
+      {
+        granted-by: tx-sender,
+        granted-at: stacks-block-height,
+        expires-at: expires-at,
+        access-level: access-level,
+        active: true
+      }
+    )
+    
+    (map-set grantee-access-count
+      { grantee: grantee }
+      { count: (+ grantee-count u1) }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (revoke-credential-access (credential-id uint) (grantee principal))
+  (let (
+    (credential (unwrap! (get-credential credential-id) err-not-found))
+    (grant (unwrap! (get-access-grant credential-id grantee) err-not-found))
+  )
+    (asserts! (is-eq tx-sender (get student-address credential)) err-unauthorized)
+    
+    (map-set credential-access-grants
+      { credential-id: credential-id, grantee: grantee }
+      (merge grant { active: false })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-read-only (access-credential-with-permission (credential-id uint))
+  (let (
+    (credential (get-credential credential-id))
+    (access-check (can-access-credential credential-id tx-sender))
+  )
+    (match credential
+      cred
+      (match access-check
+        has-access
+        (if has-access
+          (ok cred)
+          (err err-access-denied)
+        )
+        error-val
+        (err err-access-denied)
+      )
+      (err err-not-found)
+    )
+  )
 )
