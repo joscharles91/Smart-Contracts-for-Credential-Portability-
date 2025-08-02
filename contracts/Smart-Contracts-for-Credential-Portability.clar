@@ -364,3 +364,164 @@
     )
   )
 )
+
+(define-map institution-metrics
+  { institution-id: uint }
+  {
+    total-issued: uint,
+    total-revoked: uint,
+    first-credential-date: uint,
+    last-activity: uint
+  }
+)
+
+(define-map institution-ratings
+  { institution-id: uint, rater: principal }
+  {
+    score: uint,
+    comment: (string-ascii 200),
+    rated-at: uint
+  }
+)
+
+(define-map institution-rating-summary
+  { institution-id: uint }
+  {
+    total-ratings: uint,
+    score-sum: uint,
+    average-score: uint
+  }
+)
+
+(define-read-only (get-institution-metrics (institution-id uint))
+  (default-to 
+    { total-issued: u0, total-revoked: u0, first-credential-date: u0, last-activity: u0 }
+    (map-get? institution-metrics { institution-id: institution-id })
+  )
+)
+
+(define-read-only (get-institution-reputation (institution-id uint))
+  (let (
+    (metrics (get-institution-metrics institution-id))
+    (rating-summary (default-to 
+      { total-ratings: u0, score-sum: u0, average-score: u0 }
+      (map-get? institution-rating-summary { institution-id: institution-id })
+    ))
+    (revocation-rate (if (> (get total-issued metrics) u0)
+      (/ (* (get total-revoked metrics) u100) (get total-issued metrics))
+      u0
+    ))
+  )
+    (ok {
+      metrics: metrics,
+      revocation-rate: revocation-rate,
+      community-score: (get average-score rating-summary),
+      total-community-ratings: (get total-ratings rating-summary),
+      reputation-score: (calculate-reputation-score metrics rating-summary)
+    })
+  )
+)
+
+(define-read-only (get-institution-rating (institution-id uint) (rater principal))
+  (map-get? institution-ratings { institution-id: institution-id, rater: rater })
+)
+
+(define-private (calculate-reputation-score 
+  (metrics { total-issued: uint, total-revoked: uint, first-credential-date: uint, last-activity: uint })
+  (rating-summary { total-ratings: uint, score-sum: uint, average-score: uint })
+)
+  (let (
+    (activity-score (if (< (get total-issued metrics) u40) (get total-issued metrics) u40))
+    (revocation-penalty (if (> (get total-issued metrics) u0)
+      (/ (* (get total-revoked metrics) u30) (get total-issued metrics))
+      u0
+    ))
+    (quality-score (if (> (get total-issued metrics) u0)
+      (- u30 (if (< revocation-penalty u30) revocation-penalty u30))
+      u0
+    ))
+    (community-score (if (> (get total-ratings rating-summary) u0)
+      (/ (* (get average-score rating-summary) u30) u100)
+      u15
+    ))
+  )
+    (+ activity-score quality-score community-score)
+  )
+)
+
+(define-public (rate-institution (institution-id uint) (score uint) (comment (string-ascii 200)))
+  (let (
+    (institution (unwrap! (get-institution institution-id) err-not-found))
+    (existing-rating (get-institution-rating institution-id tx-sender))
+    (current-summary (default-to 
+      { total-ratings: u0, score-sum: u0, average-score: u0 }
+      (map-get? institution-rating-summary { institution-id: institution-id })
+    ))
+  )
+    (asserts! (get verified institution) err-institution-not-verified)
+    (asserts! (and (>= score u1) (<= score u100)) err-invalid-input)
+    (asserts! (> (len comment) u0) err-invalid-input)
+    
+    (let (
+      (new-total (if (is-some existing-rating) 
+        (get total-ratings current-summary)
+        (+ (get total-ratings current-summary) u1)
+      ))
+      (score-adjustment (match existing-rating
+        old-rating (- score (get score old-rating))
+        score
+      ))
+      (new-score-sum (+ (get score-sum current-summary) score-adjustment))
+      (new-average (if (> new-total u0) (/ new-score-sum new-total) u0))
+    )
+      (map-set institution-ratings
+        { institution-id: institution-id, rater: tx-sender }
+        { score: score, comment: comment, rated-at: stacks-block-height }
+      )
+      
+      (map-set institution-rating-summary
+        { institution-id: institution-id }
+        { total-ratings: new-total, score-sum: new-score-sum, average-score: new-average }
+      )
+      
+      (ok true)
+    )
+  )
+)
+
+(define-private (update-institution-metrics-on-issue (institution-id uint))
+  (let (
+    (current-metrics (get-institution-metrics institution-id))
+    (new-total-issued (+ (get total-issued current-metrics) u1))
+    (first-date (if (is-eq (get first-credential-date current-metrics) u0)
+      stacks-block-height
+      (get first-credential-date current-metrics)
+    ))
+  )
+    (map-set institution-metrics
+      { institution-id: institution-id }
+      {
+        total-issued: new-total-issued,
+        total-revoked: (get total-revoked current-metrics),
+        first-credential-date: first-date,
+        last-activity: stacks-block-height
+      }
+    )
+  )
+)
+
+(define-private (update-institution-metrics-on-revoke (institution-id uint))
+  (let (
+    (current-metrics (get-institution-metrics institution-id))
+  )
+    (map-set institution-metrics
+      { institution-id: institution-id }
+      (merge current-metrics 
+        { 
+          total-revoked: (+ (get total-revoked current-metrics) u1),
+          last-activity: stacks-block-height
+        }
+      )
+    )
+  )
+)
