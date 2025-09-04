@@ -525,3 +525,133 @@
     )
   )
 )
+
+(define-map credential-stacks
+  { stack-id: uint }
+  {
+    owner: principal,
+    title: (string-ascii 100),
+    description: (string-ascii 300),
+    domain: (string-ascii 50),
+    created-at: uint,
+    is-public: bool,
+    credential-count: uint
+  }
+)
+
+(define-map stack-credentials
+  { stack-id: uint, credential-id: uint }
+  { 
+    added-at: uint,
+    weight: uint
+  }
+)
+
+(define-map user-stack-count
+  { owner: principal }
+  { count: uint }
+)
+
+(define-data-var next-stack-id uint u1)
+
+(define-read-only (get-credential-stack (stack-id uint))
+  (map-get? credential-stacks { stack-id: stack-id })
+)
+
+(define-read-only (is-credential-in-stack (stack-id uint) (credential-id uint))
+  (is-some (map-get? stack-credentials { stack-id: stack-id, credential-id: credential-id }))
+)
+
+(define-read-only (get-user-stack-count (owner principal))
+  (default-to { count: u0 } (map-get? user-stack-count { owner: owner }))
+)
+
+(define-read-only (validate-stack-completeness (stack-id uint))
+  (match (get-credential-stack stack-id)
+    stack
+    (ok {
+      total-credentials: (get credential-count stack),
+      all-valid: (>= (get credential-count stack) u2),
+      owner-verified: (is-eq (get owner stack) tx-sender)
+    })
+    (err err-not-found)
+  )
+)
+
+(define-public (create-credential-stack 
+  (title (string-ascii 100))
+  (description (string-ascii 300))
+  (domain (string-ascii 50))
+  (is-public bool)
+)
+  (let (
+    (stack-id (var-get next-stack-id))
+    (user-count (get count (get-user-stack-count tx-sender)))
+  )
+    (asserts! (> (len title) u0) err-invalid-input)
+    (asserts! (> (len domain) u0) err-invalid-input)
+    
+    (map-set credential-stacks
+      { stack-id: stack-id }
+      {
+        owner: tx-sender,
+        title: title,
+        description: description,
+        domain: domain,
+        created-at: stacks-block-height,
+        is-public: is-public,
+        credential-count: u0
+      }
+    )
+    
+    (map-set user-stack-count
+      { owner: tx-sender }
+      { count: (+ user-count u1) }
+    )
+    
+    (var-set next-stack-id (+ stack-id u1))
+    (ok stack-id)
+  )
+)
+
+(define-public (add-credential-to-stack (stack-id uint) (credential-id uint) (weight uint))
+  (let (
+    (stack (unwrap! (get-credential-stack stack-id) err-not-found))
+    (credential (unwrap! (get-credential credential-id) err-not-found))
+  )
+    (asserts! (is-eq tx-sender (get owner stack)) err-unauthorized)
+    (asserts! (is-eq tx-sender (get student-address credential)) err-unauthorized)
+    (asserts! (not (is-credential-in-stack stack-id credential-id)) err-already-exists)
+    (asserts! (and (>= weight u1) (<= weight u10)) err-invalid-input)
+    
+    (map-set stack-credentials
+      { stack-id: stack-id, credential-id: credential-id }
+      { added-at: stacks-block-height, weight: weight }
+    )
+    
+    (map-set credential-stacks
+      { stack-id: stack-id }
+      (merge stack { credential-count: (+ (get credential-count stack) u1) })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (remove-credential-from-stack (stack-id uint) (credential-id uint))
+  (let (
+    (stack (unwrap! (get-credential-stack stack-id) err-not-found))
+  )
+    (asserts! (is-eq tx-sender (get owner stack)) err-unauthorized)
+    (asserts! (is-credential-in-stack stack-id credential-id) err-not-found)
+    
+    (map-delete stack-credentials { stack-id: stack-id, credential-id: credential-id })
+    
+    (map-set credential-stacks
+      { stack-id: stack-id }
+      (merge stack { credential-count: (- (get credential-count stack) u1) })
+    )
+    
+    (ok true)
+  )
+)
