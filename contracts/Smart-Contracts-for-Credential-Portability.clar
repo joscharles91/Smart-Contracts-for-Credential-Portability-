@@ -655,3 +655,106 @@
     (ok true)
   )
 )
+
+(define-map credential-endorsements
+  { credential-id: uint, endorser: principal }
+  {
+    endorser-type: (string-ascii 50),
+    verification-proof: (string-ascii 300),
+    endorsement-weight: uint,
+    endorsed-at: uint,
+    active: bool
+  }
+)
+
+(define-map credential-endorsement-summary
+  { credential-id: uint }
+  {
+    total-endorsements: uint,
+    total-weight: uint,
+    trust-score: uint
+  }
+)
+
+(define-map endorser-activity
+  { endorser: principal }
+  {
+    total-endorsed: uint,
+    first-endorsement: uint,
+    last-endorsement: uint,
+    credibility-score: uint
+  }
+)
+
+(define-read-only (get-credential-endorsements (credential-id uint))
+  (default-to 
+    { total-endorsements: u0, total-weight: u0, trust-score: u0 }
+    (map-get? credential-endorsement-summary { credential-id: credential-id })
+  )
+)
+
+(define-read-only (get-endorser-credibility (endorser principal))
+  (default-to 
+    { total-endorsed: u0, first-endorsement: u0, last-endorsement: u0, credibility-score: u50 }
+    (map-get? endorser-activity { endorser: endorser })
+  )
+)
+
+(define-read-only (calculate-endorser-credibility (endorser-data { total-endorsed: uint, first-endorsement: uint, last-endorsement: uint, credibility-score: uint }))
+  (let (
+    (activity-bonus (if (>= (get total-endorsed endorser-data) u10) u20 (* (get total-endorsed endorser-data) u2)))
+    (tenure-bonus (if (> (get first-endorsement endorser-data) u0)
+      (let ((tenure (- stacks-block-height (get first-endorsement endorser-data))))
+        (if (> tenure u10000) u30 (/ (* tenure u30) u10000))
+      )
+      u0
+    ))
+  )
+    (+ u50 activity-bonus tenure-bonus)
+  )
+)
+
+(define-public (endorse-credential (credential-id uint) (endorser-type (string-ascii 50)) (verification-proof (string-ascii 300)) (weight uint))
+  (let (
+    (credential (unwrap! (get-credential credential-id) err-not-found))
+    (existing-endorsement (map-get? credential-endorsements { credential-id: credential-id, endorser: tx-sender }))
+    (current-summary (get-credential-endorsements credential-id))
+    (endorser-data (get-endorser-credibility tx-sender))
+  )
+    (asserts! (not (get revoked credential)) err-unauthorized)
+    (asserts! (not (is-eq tx-sender (get student-address credential))) err-unauthorized)
+    (asserts! (is-none existing-endorsement) err-already-exists)
+    (asserts! (and (>= weight u1) (<= weight u100)) err-invalid-input)
+    (asserts! (> (len endorser-type) u0) err-invalid-input)
+    
+    (let (
+      (credibility (calculate-endorser-credibility endorser-data))
+      (weighted-score (/ (* weight credibility) u100))
+      (new-total-endorsements (+ (get total-endorsements current-summary) u1))
+      (new-total-weight (+ (get total-weight current-summary) weighted-score))
+      (new-trust-score (/ new-total-weight new-total-endorsements))
+    )
+      (map-set credential-endorsements
+        { credential-id: credential-id, endorser: tx-sender }
+        { endorser-type: endorser-type, verification-proof: verification-proof, endorsement-weight: weight, endorsed-at: stacks-block-height, active: true }
+      )
+      
+      (map-set credential-endorsement-summary
+        { credential-id: credential-id }
+        { total-endorsements: new-total-endorsements, total-weight: new-total-weight, trust-score: new-trust-score }
+      )
+      
+      (map-set endorser-activity
+        { endorser: tx-sender }
+        { 
+          total-endorsed: (+ (get total-endorsed endorser-data) u1),
+          first-endorsement: (if (is-eq (get first-endorsement endorser-data) u0) stacks-block-height (get first-endorsement endorser-data)),
+          last-endorsement: stacks-block-height,
+          credibility-score: credibility
+        }
+      )
+      
+      (ok new-trust-score)
+    )
+  )
+)
