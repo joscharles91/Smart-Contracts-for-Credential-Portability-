@@ -758,3 +758,83 @@
     )
   )
 )
+
+(define-map credential-disputes
+  { credential-id: uint }
+  {
+    claimant: principal,
+    category: (string-ascii 50),
+    reason: (string-ascii 200),
+    opened-at: uint,
+    resolved: bool,
+    resolution: (optional (string-ascii 200)),
+    resolver: (optional principal),
+    resolved-at: (optional uint)
+  }
+)
+
+(define-read-only (get-credential-dispute (credential-id uint))
+  (map-get? credential-disputes { credential-id: credential-id })
+)
+
+(define-read-only (is-credential-disputed (credential-id uint))
+  (match (get-credential-dispute credential-id)
+    dispute (not (get resolved dispute))
+    false
+  )
+)
+
+(define-public (open-credential-dispute 
+  (credential-id uint) 
+  (category (string-ascii 50)) 
+  (reason (string-ascii 200))
+)
+  (let (
+    (cred (unwrap! (get-credential credential-id) err-not-found))
+    (existing (map-get? credential-disputes { credential-id: credential-id }))
+    (allow-open (if (is-some existing) (get resolved (unwrap! existing err-not-found)) true))
+  )
+    (asserts! (is-eq tx-sender (get student-address cred)) err-unauthorized)
+    (asserts! (> (len category) u0) err-invalid-input)
+    (asserts! (> (len reason) u0) err-invalid-input)
+    (asserts! allow-open err-already-exists)
+    (map-set credential-disputes
+      { credential-id: credential-id }
+      {
+        claimant: tx-sender,
+        category: category,
+        reason: reason,
+        opened-at: stacks-block-height,
+        resolved: false,
+        resolution: none,
+        resolver: none,
+        resolved-at: none
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (resolve-credential-dispute 
+  (credential-id uint) 
+  (resolution (string-ascii 200))
+)
+  (let (
+    (cred (unwrap! (get-credential credential-id) err-not-found))
+    (dispute (unwrap! (map-get? credential-disputes { credential-id: credential-id }) err-not-found))
+  )
+    (asserts! (is-institution-admin (get institution-id cred) tx-sender) err-unauthorized)
+    (asserts! (not (get resolved dispute)) err-already-exists)
+    (asserts! (> (len resolution) u0) err-invalid-input)
+    (map-set credential-disputes
+      { credential-id: credential-id }
+      (merge dispute {
+        resolved: true,
+        resolution: (some resolution),
+        resolver: (some tx-sender),
+        resolved-at: (some stacks-block-height)
+      })
+    )
+    (ok true)
+  )
+)
